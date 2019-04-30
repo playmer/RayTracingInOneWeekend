@@ -152,17 +152,16 @@ namespace PathTracing
 
     bool hit(Ray const& aRay, float aTMin, float aTMax, HitRecord& aRecord) const override
     {
-      HitRecord toReturn;
       bool hit{ false };
       double closestHit = aTMax;
       HitRecord temp;
 
       for (auto const& hitable : mHitables)
       {
-        if (hitable->hit(aRay, aTMin, aTMax, temp))
+        if (hitable->hit(aRay, aTMin, closestHit, temp));
         {
-          toReturn = temp;
-          closestHit = toReturn.t;
+          aRecord = temp;
+          closestHit = aRecord.t;
           hit = true;
         }
       }
@@ -191,6 +190,7 @@ namespace PathTracing
     }
     else
     {
+      puts("miss\n");
       auto direction = glm::normalize(aRay.Direction());
 
       float t = 0.5f * (direction.y + 1.0f);
@@ -220,7 +220,6 @@ std::vector<Pixel> RenderFrame(size_t aWidth, size_t aHeight)
 
   PathTracing::World world;
 
-  //world.mHitables.emplace_back(std::make_unique<PathTracing::Sphere>(glm::vec3{ 0,0,-1 }, 0.5f));
   world.Add<PathTracing::Sphere>(glm::vec3{ 0,0,-1 }, 0.5f);
   world.Add<PathTracing::Sphere>(glm::vec3{ 0,-100.5,-1 }, 100.f);
 
@@ -243,7 +242,7 @@ std::vector<Pixel> RenderFrame(size_t aWidth, size_t aHeight)
       gComplete = static_cast<float>(pixelsComplete) / totalPixels;
     }
 
-    printf("%f\n", gComplete);
+    //printf("%f\n", gComplete);
   }
 
   return std::move(pixels);
