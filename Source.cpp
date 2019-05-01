@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <memory>
 #include <limits>
+#include <random>
+#include <chrono>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -35,10 +37,29 @@ struct Pixel
   uint8_t a;
 };
 
+class Random
+{
+public: 
+  Random()
+    : mDistribution{0, 1}
+  {
+    mEngine.seed(std::chrono::system_clock::now().time_since_epoch().count());
+  }
+
+  // [0, 1)
+  double GetRandom()
+  {
+    return mDistribution(mEngine);
+  }
+  std::default_random_engine mEngine;
+  std::uniform_real_distribution<double> mDistribution;
+};
 
 namespace PathTracing
 {
   using namespace glm;
+
+  Random gRandom;
 
   struct Ray
   {
@@ -63,22 +84,42 @@ namespace PathTracing
     vec3 mB;
   };
 
-  float HitSphere(vec3 const& aCenter, float aRadius, Ray const& aRay)
+  vec3 RandomInUnitSphere()
   {
-    vec3 oc = aRay.Origin() - aCenter;
+    vec3 p;
+    float pLength{ 0.0f };
 
-    float a = dot(aRay.Direction(), aRay.Direction());
-    float b = 2.0f * dot(oc, aRay.Direction());
-    float c = dot(oc,oc) - (aRadius * aRadius);
-    float discriminant = b*b - 4*a*c;
-
-    if (discriminant < 0)
+    do
     {
-      return -1.f;
+      p = (2.0f * vec3(gRandom.GetRandom(), gRandom.GetRandom(), gRandom.GetRandom())) - vec3(1, 1, 1);
+      pLength = length(p);
+    } while ((pLength * pLength) >= 1.0f);
+
+    return p;
+  }
+
+  class Camera
+  {
+  public:
+    Camera()
+      : mOrigin{ 0, 0, 0 }
+      , mLowerLeftCorner{ -2, -1, -1 }
+      , mHorizontal{ 4, 0, 0 }
+      , mVertical{ 0, 2, 0 }
+    {
+
     }
 
-    return (-b - sqrt(discriminant)) / (2.0f * a);
-  }
+    Ray GetRay(float aU, float aV)
+    {
+      return Ray{ mOrigin, mLowerLeftCorner + (aU * mHorizontal) + (aV * mVertical) };
+    }
+
+    vec3 mOrigin;
+    vec3 mLowerLeftCorner;
+    vec3 mHorizontal;
+    vec3 mVertical;
+  };
 
   struct HitRecord
   {
@@ -158,7 +199,7 @@ namespace PathTracing
 
       for (auto const& hitable : mHitables)
       {
-        if (hitable->hit(aRay, aTMin, closestHit, temp));
+        if (hitable->hit(aRay, aTMin, closestHit, temp))
         {
           aRecord = temp;
           closestHit = aRecord.t;
@@ -186,11 +227,11 @@ namespace PathTracing
 
     if (aWorld.hit(aRay, 0.0f, std::numeric_limits<float>::max(), record))
     {
-      return 0.5f * vec3{ record.normal.x + 1.0f, record.normal.y + 1.0f, record.normal.z + 1.0f };
+      vec3 target = record.p + record.normal + RandomInUnitSphere();
+      return 0.5f* Color(Ray{record.p, target - record.p}, aWorld);
     }
     else
     {
-      puts("miss\n");
       auto direction = glm::normalize(aRay.Direction());
 
       float t = 0.5f * (direction.y + 1.0f);
@@ -201,8 +242,9 @@ namespace PathTracing
 
 static float gComplete = 0.0f;
 
-std::vector<Pixel> RenderFrame(size_t aWidth, size_t aHeight)
+std::vector<Pixel> RenderFrame(size_t aWidth, size_t aHeight, size_t aRaysPerPixel)
 {
+  Random random;
   std::vector<Pixel> pixels;
 
   size_t totalPixels = aWidth * aHeight;
@@ -213,10 +255,7 @@ std::vector<Pixel> RenderFrame(size_t aWidth, size_t aHeight)
   float fWidth = static_cast<float>(aWidth);
   float fHeight = static_cast<float>(aHeight);
 
-  glm::vec3 lowerLeftCorner{ -2.0f, -1.0f, -1.0f };
-  glm::vec3 horizontal{ 4.0f, 0.0f, 0.0f };
-  glm::vec3 vertical{ 0.0f, 2.0f, 0.0f };
-  glm::vec3 origin{ 0.0f, 0.0f, 0.0f };
+  PathTracing::Camera camera;
 
   PathTracing::World world;
 
@@ -227,13 +266,18 @@ std::vector<Pixel> RenderFrame(size_t aWidth, size_t aHeight)
   {
     for (size_t i = 0; i < aWidth; ++i)
     {
-      float u = i / fWidth;
-      float v = j / fHeight;
+      glm::vec3 color{0,0,0};
 
-      PathTracing::Ray ray{ origin,
-                            lowerLeftCorner + (u * horizontal) + (v * vertical) };
+      for (size_t s = 0; s < aRaysPerPixel; ++s)
+      {
+        float u = (i + random.GetRandom()) / fWidth;
+        float v = (j + random.GetRandom()) / fHeight;
+        
+        auto ray = camera.GetRay(u, v);
+        color += PathTracing::Color(ray, world);
+      }
 
-      glm::vec3 color{ PathTracing::Color(ray, world) };
+      color /= aRaysPerPixel;
 
       pixels.emplace_back(color);
 
@@ -242,7 +286,7 @@ std::vector<Pixel> RenderFrame(size_t aWidth, size_t aHeight)
       gComplete = static_cast<float>(pixelsComplete) / totalPixels;
     }
 
-    //printf("%f\n", gComplete);
+    printf("%f\n", gComplete);
   }
 
   return std::move(pixels);
@@ -252,7 +296,7 @@ int main()
 {
   size_t width = 600;
   size_t height = 300;
-  auto pixels =  RenderFrame(width, height);
+  auto pixels =  RenderFrame(width, height, 100);
 
   stbi_write_png("output.png",
                  width,
