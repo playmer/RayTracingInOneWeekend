@@ -11,8 +11,19 @@
 
 #include "glm/glm.hpp"
 
+#include "ThreadPool/ThreadPool.h"
+
 struct Pixel
 {
+  Pixel()
+    : r{ 0 }
+    , g{ 0 }
+    , b{ 0 }
+    , a{ 255 }
+  {
+
+  }
+
   Pixel(uint8_t aR, uint8_t aG, uint8_t aB)
     : r{ aR }
     , g{ aG }
@@ -110,7 +121,7 @@ namespace PathTracing
 
     }
 
-    Ray GetRay(float aU, float aV)
+    Ray GetRay(float aU, float aV) const
     {
       return Ray{ mOrigin, mLowerLeftCorner + (aU * mHorizontal) + (aV * mVertical) };
     }
@@ -121,26 +132,151 @@ namespace PathTracing
     vec3 mVertical;
   };
 
+  vec3 Reflect(vec3 const& aVector, vec3 const& aNormal)
+  {
+    return aVector - 2 * dot(aVector, aNormal) * aNormal;
+  }
+
+  bool refract(vec3 const& v, vec3 const& n, float ni_over_nt, vec3& refracted)
+  {
+    vec3 uv = normalize(v);
+
+    float dt = dot(uv, n);
+    float discriminant = 1.0f - ni_over_nt * ni_over_nt * (1 - dt * dt);
+
+    if (discriminant > 0)
+    {
+      refracted = ni_over_nt * (uv - n * dt) - n * sqrt(discriminant);
+      return true;
+    }
+    else
+    {
+      return false;
+    }
+  }
+
+  class Material;
+
   struct HitRecord
   {
     float t;
     vec3 p;
     vec3 normal;
+    Material* mMaterial;
   };
 
   class Hitable
   {
   public:
-    virtual bool hit(Ray const& r, float aTMin, float aTMax, HitRecord& aRecord) const = 0;
+    virtual bool hit(Ray const& aRay, float aTMin, float aTMax, HitRecord& aRecord) const = 0;
   };
 
+  class Material
+  {
+  public:
+    virtual bool scatter(Ray const& aRay, HitRecord& aRecord, vec3& aAttenuation, Ray& aScattered) const = 0;
+  };
+
+  class Lambertian : public Material
+  {
+  public:
+    Lambertian(vec3 aAlbedo)
+      : mAlbedo{aAlbedo}
+    {
+
+    }
+
+    bool scatter(Ray const& aRay, HitRecord& aRecord, vec3& aAttenuation, Ray& aScattered) const override
+    {
+      vec3 target = aRecord.p + aRecord.normal + RandomInUnitSphere();
+      aScattered = Ray{ aRecord.p, target - aRecord.p };
+      aAttenuation = mAlbedo;
+
+      return true;
+    }
+
+
+    vec3 mAlbedo;
+  };
+
+  class Metal : public Material
+  {
+  public:
+    Metal(vec3 aAlbedo, float aFuzz)
+      : mAlbedo{ aAlbedo }
+      , mFuzz{ aFuzz }
+    {
+      if (mFuzz > 1)
+      {
+        mFuzz = 1.f;
+      }
+    }
+
+    bool scatter(Ray const& aRay, HitRecord& aRecord, vec3& aAttenuation, Ray& aScattered) const override
+    {
+      vec3 reflected = reflect(normalize(aRay.Direction()), aRecord.normal);
+      aScattered = Ray{ aRecord.p, reflected + mFuzz * RandomInUnitSphere() };
+      aAttenuation = mAlbedo;
+
+      return (dot(aScattered.Direction(), aRecord.normal) > 0.f);
+    }
+
+
+    vec3 mAlbedo;
+    float mFuzz;
+  };
+
+  class Dielectric : public Material
+  {
+  public:
+    Dielectric(float aRefractiveIndex)
+      : mRefractiveIndex{ aRefractiveIndex }
+    {
+
+    }
+
+    bool scatter(Ray const& aRay, HitRecord& aRecord, vec3& aAttenuation, Ray& aScattered) const override
+    {
+      vec3 outwardNormal;
+      vec3 reflected = reflect(aRay.Direction(), aRecord.normal);
+      float ni_over_nt;
+      aAttenuation = vec3{ 1,1,0 };
+      vec3 refracted;
+
+      if (dot(aRay.Direction(), aRecord.normal) > 0)
+      {
+        outwardNormal = -aRecord.normal;
+        ni_over_nt = mRefractiveIndex;
+      }
+      else
+      {
+        outwardNormal = aRecord.normal;
+        ni_over_nt = 1.0f / mRefractiveIndex;
+      }
+
+      if (refract(aRay.Direction(), outwardNormal, ni_over_nt, refracted))
+      {
+        aScattered = Ray{ aRecord.p, refracted };
+      }
+      else
+      {
+        aScattered = Ray{ aRecord.p, reflected };
+        return false;
+      }
+
+      return true;
+    }
+
+    float mRefractiveIndex;
+  };
 
   class Sphere : public Hitable
   {
   public:
-    Sphere(vec3 const& aCenter, float aRadius)
+    Sphere(vec3 const& aCenter, float aRadius, std::unique_ptr<Material> aMaterial)
       : mCenter{aCenter}
       , mRadius {aRadius}
+      , mMaterial{std::move(aMaterial)}
     {
 
     }
@@ -163,6 +299,7 @@ namespace PathTracing
           aRecord.t = temp;
           aRecord.p = aRay.PointAtT(temp);
           aRecord.normal = (aRecord.p - mCenter) / mRadius;
+          aRecord.mMaterial = mMaterial.get();
           return true;
         }
 
@@ -173,6 +310,7 @@ namespace PathTracing
           aRecord.t = temp;
           aRecord.p = aRay.PointAtT(temp);
           aRecord.normal = (aRecord.p - mCenter) / mRadius;
+          aRecord.mMaterial = mMaterial.get();
           return true;
         }
       }
@@ -181,6 +319,7 @@ namespace PathTracing
     }
 
   private:
+    std::unique_ptr<Material> mMaterial;
     vec3 mCenter;
     float mRadius;
   };
@@ -221,14 +360,23 @@ namespace PathTracing
 
 
 
-  vec3 Color(Ray const& aRay, World const& aWorld)
+  vec3 Color(Ray const& aRay, World const& aWorld, size_t aDepth)
   {
     HitRecord record;
 
-    if (aWorld.hit(aRay, 0.0f, std::numeric_limits<float>::max(), record))
+    if (aWorld.hit(aRay, 0.001f, std::numeric_limits<float>::max(), record))
     {
-      vec3 target = record.p + record.normal + RandomInUnitSphere();
-      return 0.5f* Color(Ray{record.p, target - record.p}, aWorld);
+      Ray scattered;
+      vec3 attenuation;
+
+      if (aDepth < 50 && record.mMaterial->scatter(aRay, record, attenuation, scattered))
+      {
+        return attenuation * Color(scattered, aWorld, aDepth + 1);
+      }
+      else
+      {
+        return vec3{ 0, 0, 0 };
+      }
     }
     else
     {
@@ -238,65 +386,70 @@ namespace PathTracing
       return ((1.0f - t) * glm::vec3{ 1.0f, 1.0f, 1.0f }) + (t * glm::vec3{ 0.5f, 0.7f, 1.0f });
     }
   }
-}
 
-static float gComplete = 0.0f;
-
-std::vector<Pixel> RenderFrame(size_t aWidth, size_t aHeight, size_t aRaysPerPixel)
-{
-  Random random;
-  std::vector<Pixel> pixels;
-
-  size_t totalPixels = aWidth * aHeight;
-  size_t pixelsComplete = 0;
-
-  pixels.reserve(totalPixels);
-
-  float fWidth = static_cast<float>(aWidth);
-  float fHeight = static_cast<float>(aHeight);
-
-  PathTracing::Camera camera;
-
-  PathTracing::World world;
-
-  world.Add<PathTracing::Sphere>(glm::vec3{ 0,0,-1 }, 0.5f);
-  world.Add<PathTracing::Sphere>(glm::vec3{ 0,-100.5,-1 }, 100.f);
-
-  for (std::int64_t j = static_cast<std::int64_t>(aHeight - 1); j >= 0; --j)
+  std::vector<Pixel> RenderFrame(size_t aWidth, size_t aHeight, size_t aRaysPerPixel)
   {
-    for (size_t i = 0; i < aWidth; ++i)
+    std::vector<Pixel> pixels;
+
+    pixels.resize(aWidth * aHeight);
+
+    float fWidth = static_cast<float>(aWidth);
+    float fHeight = static_cast<float>(aHeight);
+
+    PathTracing::Camera const camera;
+
+    PathTracing::World world;
+
+    world.Add<PathTracing::Sphere>(glm::vec3{ 0,0,-1 }, 0.5f, std::make_unique<Lambertian>(vec3{.1f, .2f, .5f}));
+    world.Add<PathTracing::Sphere>(glm::vec3{ 0,-100.5,-1 }, 100.f, std::make_unique<Lambertian>(vec3{ .8f, .8f, .0f }));
+    world.Add<PathTracing::Sphere>(glm::vec3{ 1,0,-1 }, 0.5f, std::make_unique<Metal>(vec3{ .8f, .6f, .2f }, 0.1f));
+    world.Add<PathTracing::Sphere>(glm::vec3{ -1,0,-1 }, 0.5f, std::make_unique<Dielectric>(1.5f));
+
+    progschj::ThreadPool pool{std::thread::hardware_concurrency()};
+
+    size_t k = 0;
+
+    for (std::int64_t j = static_cast<std::int64_t>(aHeight - 1); j >= 0; --j)
     {
-      glm::vec3 color{0,0,0};
-
-      for (size_t s = 0; s < aRaysPerPixel; ++s)
+      for (size_t i = 0; i < aWidth; ++i)
       {
-        float u = (i + random.GetRandom()) / fWidth;
-        float v = (j + random.GetRandom()) / fHeight;
-        
-        auto ray = camera.GetRay(u, v);
-        color += PathTracing::Color(ray, world);
+        pool.enqueue([fWidth, fHeight, &camera, &world, aRaysPerPixel, &pixels, i, j, k]()
+        {
+          static thread_local Random random;
+          glm::vec3 color{ 0,0,0 };
+
+          for (size_t s = 0; s < aRaysPerPixel; ++s)
+          {
+            float u = (i + random.GetRandom()) / fWidth;
+            float v = (j + random.GetRandom()) / fHeight;
+
+            auto ray = camera.GetRay(u, v);
+            color += PathTracing::Color(ray, world, 0);
+          }
+
+          color /= aRaysPerPixel;
+
+          color = glm::vec3{ sqrtf(color[0]), sqrtf(color[1]), sqrtf(color[2]) };
+
+          pixels[k] = color;
+        });
+
+        ++k;
       }
-
-      color /= aRaysPerPixel;
-
-      pixels.emplace_back(color);
-
-      ++pixelsComplete;
-
-      gComplete = static_cast<float>(pixelsComplete) / totalPixels;
     }
 
-    printf("%f\n", gComplete);
-  }
+    pool.wait_until_empty();
+    pool.wait_until_nothing_in_flight();
 
-  return std::move(pixels);
+    return std::move(pixels);
+  }
 }
 
 int main()
 {
   size_t width = 600;
   size_t height = 300;
-  auto pixels =  RenderFrame(width, height, 100);
+  auto pixels =  PathTracing::RenderFrame(width, height, 100);
 
   stbi_write_png("output.png",
                  width,
