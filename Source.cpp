@@ -72,6 +72,12 @@ namespace PathTracing
 
   Random gRandom;
 
+  template <typename tType>
+  inline tType Square(tType aValue)
+  {
+    return aValue * aValue;
+  }
+
   struct Ray
   {
     Ray() {}
@@ -132,19 +138,14 @@ namespace PathTracing
     vec3 mVertical;
   };
 
-  vec3 Reflect(vec3 const& aVector, vec3 const& aNormal)
-  {
-    return aVector - 2 * dot(aVector, aNormal) * aNormal;
-  }
-
   bool refract(vec3 const& v, vec3 const& n, float ni_over_nt, vec3& refracted)
   {
     vec3 uv = normalize(v);
 
     float dt = dot(uv, n);
-    float discriminant = 1.0f - ni_over_nt * ni_over_nt * (1 - dt * dt);
+    float discriminant = 1.0f - Square(ni_over_nt) * (1 - Square(dt));
 
-    if (discriminant > 0)
+    if (discriminant > 0.f)
     {
       refracted = ni_over_nt * (uv - n * dt) - n * sqrt(discriminant);
       return true;
@@ -153,6 +154,14 @@ namespace PathTracing
     {
       return false;
     }
+  }
+
+  float Schlick(float cosine, float aRefractiveIndex)
+  {
+    float r0 = (1.f - aRefractiveIndex) / (1 + aRefractiveIndex);
+    r0 = Square(r0);
+
+    return r0 + (1 - r0) * pow((1 - cosine), 5);
   }
 
   class Material;
@@ -240,28 +249,46 @@ namespace PathTracing
       vec3 outwardNormal;
       vec3 reflected = reflect(aRay.Direction(), aRecord.normal);
       float ni_over_nt;
-      aAttenuation = vec3{ 1,1,0 };
+      aAttenuation = vec3{ 1,1,1 };
       vec3 refracted;
+      float cosine;
+      float reflectiveProbability = 0.0f;
 
-      if (dot(aRay.Direction(), aRecord.normal) > 0)
+      float dotP = dot(aRay.Direction(), aRecord.normal);
+      cosine = dotP / length(aRay.Direction());
+
+      if (dotP > 0)
       {
         outwardNormal = -aRecord.normal;
         ni_over_nt = mRefractiveIndex;
+
+        cosine = sqrt(1.f - Square(mRefractiveIndex) * (1.0f - Square(cosine)));
       }
       else
       {
         outwardNormal = aRecord.normal;
         ni_over_nt = 1.0f / mRefractiveIndex;
+
+        cosine = -cosine;
       }
 
       if (refract(aRay.Direction(), outwardNormal, ni_over_nt, refracted))
       {
-        aScattered = Ray{ aRecord.p, refracted };
+        reflectiveProbability = Schlick(cosine, mRefractiveIndex);
       }
       else
       {
         aScattered = Ray{ aRecord.p, reflected };
-        return false;
+        reflectiveProbability = 1.f;
+      }
+
+      if (gRandom.GetRandom() < reflectiveProbability)
+      {
+        aScattered = Ray{ aRecord.p, reflected };
+      }
+      else
+      {
+        aScattered = Ray{ aRecord.p, refracted };
       }
 
       return true;
